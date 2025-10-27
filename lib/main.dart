@@ -35,6 +35,19 @@ class _MyAppState extends State<MyApp> {
 
   @override
   void dispose() {
+    // Add delay before stopping streams
+    if (localStream != null) {
+      Future.delayed(const Duration(milliseconds: 300), () {
+        localStream!.getTracks().forEach((track) => track.stop());
+        localStream!.dispose();
+      });
+    }
+    if (screenStream != null) {
+      Future.delayed(const Duration(milliseconds: 300), () {
+        screenStream!.getTracks().forEach((track) => track.stop());
+        screenStream!.dispose();
+      });
+    }
     localRenderer.dispose();
     remoteRenderer.dispose();
     pc?.close();
@@ -95,6 +108,8 @@ class _MyAppState extends State<MyApp> {
 
     // get camera + mic
     localStream = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': true});
+    // Add wait for camera initialization
+    await Future.delayed(const Duration(milliseconds: 500));
     localRenderer.srcObject = localStream;
     localStream!.getTracks().forEach((track) => pc!.addTrack(track, localStream!));
   }

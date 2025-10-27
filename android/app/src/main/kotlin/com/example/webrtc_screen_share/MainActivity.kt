@@ -32,6 +32,9 @@ class MainActivity: FlutterActivity() {
                 }
                 "startForegroundService" -> {
                     val intent = Intent(this, MediaProjectionService::class.java)
+                    // Pass MediaProjection data to the service
+                    projectionResultCode?.let { intent.putExtra("resultCode", it) }
+                    projectionResultData?.let { intent.putExtra("data", it) }
                     // startForegroundService required on API 26+
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         this.startForegroundService(intent)
