@@ -1,122 +1,205 @@
+// lib/main.dart
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:socket_io_client/socket_io_client.dart' as IO;
 
 void main() {
-  runApp(const MyApp());
+  runApp(MyApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class MyApp extends StatefulWidget {
+  @override
+  State createState() => _MyAppState();
+}
 
-  // This widget is the root of your application.
+class _MyAppState extends State<MyApp> {
+  final _channel = const MethodChannel('media_projection');
+  RTCPeerConnection? pc;
+  MediaStream? localStream;
+  MediaStream? screenStream;
+  final localRenderer = RTCVideoRenderer();
+  final remoteRenderer = RTCVideoRenderer();
+  IO.Socket? socket;
+
+  final String signalingUrl = 'http://10.0.2.2:5000'; // change to your server URL (use device IP for real device)
+  String token = ''; // fill in via your admin panel token generation
+  String roomId = ''; // fill room id
+
+  @override
+  void initState() {
+    super.initState();
+    initRenderers();
+  }
+
+  @override
+  void dispose() {
+    localRenderer.dispose();
+    remoteRenderer.dispose();
+    pc?.close();
+    socket?.disconnect();
+    super.dispose();
+  }
+
+  Future<void> initRenderers() async {
+    await localRenderer.initialize();
+    await remoteRenderer.initialize();
+  }
+
+  Future<void> startClient() async {
+    // 1) connect to signaling
+    socket = IO.io(signalingUrl, IO.OptionBuilder()
+        .setTransports(['websocket'])
+        .setAuth({'token': token})
+        .build());
+
+    socket!.onConnect((_) => print('connected to signaling'));
+    socket!.on('offer', (data) async {
+      await pc?.setRemoteDescription(RTCSessionDescription(data['sdp']['sdp'], data['sdp']['type']));
+      final answer = await pc!.createAnswer();
+      await pc!.setLocalDescription(answer);
+      socket!.emit('answer', {'sdp': answer});
+    });
+    socket!.on('answer', (data) async {
+      await pc?.setRemoteDescription(RTCSessionDescription(data['sdp']['sdp'], data['sdp']['type']));
+    });
+    socket!.on('ice-candidate', (data) async {
+      final c = data['candidate'];
+      await pc?.addCandidate(RTCIceCandidate(c['candidate'], c['sdpMid'], c['sdpMLineIndex']));
+    });
+    socket!.on('user-joined', (_) async {
+      final offer = await pc!.createOffer();
+      await pc!.setLocalDescription(offer);
+      socket!.emit('offer', {'sdp': offer});
+    });
+
+    // 2) create PC & get camera
+    pc = await createPeerConnection({
+      'iceServers': [
+        {'urls': 'stun:stun.l.google.com:19302'}
+      ]
+    });
+
+    pc!.onIceCandidate = (candidate) {
+      if (candidate != null) {
+        socket!.emit('ice-candidate', {'candidate': candidate.toMap()});
+      }
+    };
+
+    pc!.onTrack = (event) {
+      if (event.streams.isNotEmpty) {
+        remoteRenderer.srcObject = event.streams[0];
+      }
+    };
+
+    // get camera + mic
+    localStream = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': true});
+    localRenderer.srcObject = localStream;
+    localStream!.getTracks().forEach((track) => pc!.addTrack(track, localStream!));
+  }
+
+  Future<void> requestProjectionAndStartService() async {
+    try {
+      // 1) request media projection permission via native
+      await _channel.invokeMethod('requestProjection');
+      // 2) start foreground service so MediaProjection can be used (android requirement)
+      await _channel.invokeMethod('startForegroundService');
+      print('Projection requested and foreground service started');
+    } on PlatformException catch (e) {
+      print('PlatformException when requesting projection: $e');
+      return;
+    }
+  }
+
+  Future<void> startScreenShare() async {
+    if (pc == null) {
+      await startClient();
+    }
+
+    // Ask native to show projection permission & start foreground service
+    await requestProjectionAndStartService();
+
+    // Now call getDisplayMedia - flutter_webrtc will attempt to use existing projection permission
+    try {
+      screenStream = await navigator.mediaDevices.getDisplayMedia({'video': true});
+      final screenTrack = screenStream!.getVideoTracks()[0];
+
+      // find existing video sender
+      final sender = pc!.getSenders().firstWhere((s) => s.track?.kind == 'video', orElse: () => null);
+      if (sender == null) {
+        pc!.addTrack(screenTrack, screenStream!);
+      } else {
+        await sender.replaceTrack(screenTrack);
+      }
+
+      // update local preview to show screen
+      localRenderer.srcObject = screenStream;
+
+      // renegotiate (create offer)
+      final offer = await pc!.createOffer();
+      await pc!.setLocalDescription(offer);
+      socket!.emit('offer', {'sdp': offer});
+      print('Screen sharing started');
+
+      // listen for stop
+      screenTrack.onEnded = () async {
+        print('Screen track ended, reverting to camera');
+        // revert
+        final camTrack = localStream!.getVideoTracks()[0];
+        final sender = pc!.getSenders().firstWhere((s) => s.track?.kind == 'video', orElse: () => null);
+        if (sender != null) await sender.replaceTrack(camTrack);
+        localRenderer.srcObject = localStream;
+        screenStream = null;
+
+        final offer = await pc!.createOffer();
+        await pc!.setLocalDescription(offer);
+        socket!.emit('offer', {'sdp': offer});
+      };
+    } catch (e) {
+      print('getDisplayMedia failed: $e');
+    }
+  }
+
+  Future<void> stopForegroundService() async {
+    try {
+      await _channel.invokeMethod('stopForegroundService');
+    } catch (e) {
+      print('stopForegroundService failed: $e');
+    }
+  }
+
+  Widget buildControls() {
+    return Column(
+      children: [
+        ElevatedButton(onPressed: () => startClient(), child: Text('Start camera & connect')),
+        ElevatedButton(onPressed: () => startScreenShare(), child: Text('Start screen share')),
+        ElevatedButton(onPressed: () async {
+          await stopForegroundService();
+          print('Stopped service');
+        }, child: Text('Stop foreground service'))
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
-    );
-  }
-}
-
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
-
-  @override
-  State<MyHomePage> createState() => _MyHomePageState();
-}
-
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
-
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
-    return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+      title: 'Flutter WebRTC ScreenShare',
+      home: Scaffold(
+        appBar: AppBar(title: Text('Screen share test')),
+        body: Column(
+          children: [
+            Expanded(
+              child: RTCVideoView(localRenderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
             ),
+            Expanded(
+              child: RTCVideoView(remoteRenderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover),
+            ),
+            buildControls(),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
   }
 }
