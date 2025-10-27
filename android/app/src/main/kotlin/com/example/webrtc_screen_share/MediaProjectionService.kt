@@ -1,5 +1,6 @@
 package com.example.webrtc_screen_share
 
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -13,6 +14,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 
 class MediaProjectionService : Service() {
+
     private var mediaProjection: MediaProjection? = null
     private val NOTIFICATION_ID = 1
     private val CHANNEL_ID = "MediaProjectionChannel"
@@ -24,12 +26,12 @@ class MediaProjectionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Retrieve the MediaProjection from the intent
-        if (intent != null) {
-            val resultCode = intent.getIntExtra("resultCode", RESULT_CANCELED)
+         if (intent != null) {
+            val resultCode = intent.getIntExtra("resultCode", Activity.RESULT_CANCELED)
             val data = intent.getParcelableExtra<Intent>("data")
-            if (resultCode == RESULT_OK && data != null) {
-                val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                val mediaProjectionManager =
+                    getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, data)
             }
         }
