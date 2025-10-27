@@ -125,39 +125,69 @@ class _MyAppState extends State<MyApp> {
       screenStream = await navigator.mediaDevices.getDisplayMedia({'video': true});
       final screenTrack = screenStream!.getVideoTracks()[0];
 
-      // find existing video sender
-      final sender = pc!.getSenders().firstWhere((s) => s.track?.kind == 'video', orElse: () => null);
-      if (sender == null) {
-        pc!.addTrack(screenTrack, screenStream!);
-      } else {
-        await sender.replaceTrack(screenTrack);
+      // find existing video sender (null-safe)
+      final senders = await pc!.getSenders();
+      RTCRtpSender? sender;
+      for (final s in senders) {
+        if (s.track?.kind == 'video') {
+          sender = s;
+          break;
+        }
       }
 
-      // update local preview to show screen
+      if (sender == null) {
+        pc!.addTrack(screenTrack, screenStream!);
+        print('No existing video sender found — added screen track as new sender');
+      } else {
+        await sender.replaceTrack(screenTrack);
+        print('Replaced existing video track with screen track');
+      }
+
+      // Update local preview to show the screen
       localRenderer.srcObject = screenStream;
 
-      // renegotiate (create offer)
+      // Renegotiate (create offer)
       final offer = await pc!.createOffer();
       await pc!.setLocalDescription(offer);
       socket!.emit('offer', {'sdp': offer});
-      print('Screen sharing started');
+      print('📡 Screen sharing started and offer sent');
 
-      // listen for stop
+      // Handle stop event (when user stops sharing from system UI)
       screenTrack.onEnded = () async {
-        print('Screen track ended, reverting to camera');
-        // revert
+        print('🛑 Screen sharing ended, reverting to camera');
+
+        // revert back to camera track
         final camTrack = localStream!.getVideoTracks()[0];
-        final sender = pc!.getSenders().firstWhere((s) => s.track?.kind == 'video', orElse: () => null);
-        if (sender != null) await sender.replaceTrack(camTrack);
+
+        final sendersBack = await pc!.getSenders();
+        RTCRtpSender? senderBack;
+        for (final s in sendersBack) {
+          if (s.track?.kind == 'video') {
+            senderBack = s;
+            break;
+          }
+        }
+
+        if (senderBack != null) {
+          await senderBack.replaceTrack(camTrack);
+          print('✅ Reverted to camera track');
+        } else {
+          pc!.addTrack(camTrack, localStream!);
+          print('Added camera track again (no existing sender found)');
+        }
+
+        // Update preview back to camera
         localRenderer.srcObject = localStream;
         screenStream = null;
 
-        final offer = await pc!.createOffer();
-        await pc!.setLocalDescription(offer);
-        socket!.emit('offer', {'sdp': offer});
+        // Send a new offer so peers update their streams
+        final offerBack = await pc!.createOffer();
+        await pc!.setLocalDescription(offerBack);
+        socket!.emit('offer', {'sdp': offerBack});
+        print('🔄 Sent re-offer after stopping screen share');
       };
     } catch (e) {
-      print('getDisplayMedia failed: $e');
+      print('❌ getDisplayMedia failed: $e');
     }
   }
 
