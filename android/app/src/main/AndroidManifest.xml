@@ -40,7 +40,7 @@
         <service
             android:name=".MediaProjectionService"
             android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
+            android:foregroundServiceType="mediaProjection|camera|microphone" />
 
         <meta-data
             android:name="flutterEmbedding"
